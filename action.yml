@@ -1,0 +1,116 @@
+name: 'Cache ArduinoCLI'
+description: 'Verifies ArduinoCLI cache is up-to-date'
+inputs:
+  cache-prefix:  #
+    description: 'Prefix of cache name; Defines both restore point and prefix of new caches'
+    default: ArduinoCLI-v0.1
+    required: true
+  # paths:  # 
+  #   description: 'list of paths to include in the cache'
+  #   default: |
+  #     ~/Arduino
+  #     ~/.arduino15
+  #   required: true
+  # bm-additional_urls:  #
+  #   description: 'list of additional board manager URLs to install from'
+  #   required: false
+  # cores:
+  #   description: 'list of cores to install'
+  #   default: |
+  #     'arduino:avr'
+  #     'ATTinyCore:avr'
+  #   required: true
+
+outputs:
+  restored:
+    description: 'true/false - true when a prior cache was restored'
+    value: ${{ steps.restore-cache.outputs.cache-hit }}
+  updated:
+    description: 'true/false - true when cache was updated'
+    value: ${{ !(steps.check-new-hash.outputs.cache-hit) }}
+  key:
+    description: 'the key to the final cache (after any updates)'
+    value: ${{ steps.check-new-hash.outputs.primary-key }}
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Generating random (nonexistant) key
+      id: gen-key
+      run: echo "random-key=$(echo $RANDOM)$(echo $RANDOM)$(echo $RANDOM)$(echo $RANDOM)" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Restore latest available cache (if any) as starting point
+      id: restore-cache
+      uses: martijnhols/actions-cache/restore@0c8b146960b781c0cf795fb1fa4a0e183f82ac9b
+      with:
+        path: |
+          ~/Arduino
+          ~/.arduino15
+        key: foobar-not-a-real-key-${{ env.random-key }}
+        restore-keys: ${{ inputs.cache-prefix }}-${{ runner.os }}-
+
+    - name: Setup arduino-cli
+      uses: henrygab/setup-arduino-cli@d55749cc29f61465921453bf672008cf334c4dd0
+
+    # arduino-cli reports an error here when configuration file already exists
+    # so must use `|| true` hack to ignore this error.
+    - name: Ensure arduino-cli configuration file exists
+      run: arduino-cli config init || true
+
+    - name: Clear any existing additional Board Manager URLs
+      run: |
+        arduino-cli config delete board_manager.additional_urls
+
+    - name: Add each additional Board Manager URL
+      run: |
+        arduino-cli config add board_manager.additional_urls http://drazzy.com/package_drazzy.com_index.json
+
+    - name: Update core index using those board manager URLs
+      run: arduino-cli core update-index
+
+    - name: Install latest version of cores and tools
+      run: |
+        arduino-cli core install "arduino:avr"
+        arduino-cli core install "ATTinyCore:avr"
+
+    # The output of these four commands each discover differences:
+    # ... version     -- detects update of arduino-cli version
+    # ... config dump -- detects update of board manager URIs (or other config)
+    # ... core search -- detects update of any BSP version
+    # ... core list   -- detects update of installed versions
+    # Hashed the output from all four,
+    # then hash those four hashes to derive final key suffix
+    - name: Calculate new hash parts
+      id: sha256
+      run: |
+        echo "version=$( arduino-cli version      | sha256sum -b | awk '{print $1}' )" >> $GITHUB_ENV
+        echo "config=$(  arduino-cli config dump  | sha256sum -b | awk '{print $1}' )" >> $GITHUB_ENV
+        echo "search=$(  arduino-cli core search  | sha256sum -b | awk '{print $1}' )" >> $GITHUB_ENV
+        echo "list=$(    arduino-cli core list    | sha256sum -b | awk '{print $1}' )" >> $GITHUB_ENV
+
+    - name: Calculate Combined Hash
+      id: combined_sha256
+      run: |
+        echo "cache_key=$( echo '${{ env.version }}-${{ env.config }}-${{ env.search }}-${{ env.list }}' | sha256sum -b | awk '{print $1}' )" >> $GITHUB_ENV
+
+    - name: Check if the new key already exists
+      id: check-new-hash
+      uses: martijnhols/actions-cache/check@0c8b146960b781c0cf795fb1fa4a0e183f82ac9b
+      with:
+        path: |
+          ~/Arduino
+          ~/.arduino15
+        key: ${{ inputs.cache-prefix }}-${{ runner.os }}-
+
+    - if: steps.check-new-hash.outputs.cache-hit != 'true'
+      name: Creating new cache
+      uses: martijnhols/actions-cache/save@0c8b146960b781c0cf795fb1fa4a0e183f82ac9b
+      with:
+        path: |
+          ~/Arduino
+          ~/.arduino15
+        key: ${{ steps.check-new-hash.outputs.primary-key }}
+
+
